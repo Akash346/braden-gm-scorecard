@@ -212,16 +212,3 @@ scripts/
 
 ---
 
-## Loom Demo Script
-
-1. **Introduction** — "This is the Braden GM Morning Scorecard, an AI-powered operations tool for dealership groups."
-2. **Load sample data** — Click "Use Sample Dealership Data" and show the data status panel.
-3. **Walk KPI cards** — "12 stores, 30 days, 1,269 units sold. Total PVR and front vs. back breakdown."
-4. **Charts walkthrough** — Gross by Store (stacked), Sales Trend, Lead Source Closing Ratio.
-5. **Alerts panel** — "These are rule-based alerts. No AI needed — Store 4 front PVR is flagged, Store 7 has a closing ratio problem."
-6. **Tables** — Store performance table, sort by total PVR. Lead source table, highlight CarGurus.
-7. **AI Briefing** — Click "Generate AI Briefing". Wait ~3 seconds. Walk through headline, findings, watch items, action checklist.
-8. **Copy Briefing** — Click "Copy GM Briefing" and paste into notes.
-9. **Security** — "Open browser DevTools, Network tab. You'll see only aggregated JSON sent to our API route — no raw CSV, no API key exposed."
-10. **Upload your own** — Show uploading a custom CSV file.
-11. **Close** — "This is a production-grade tool. With DMS integration and a scheduled email job, a GM could have this in their inbox before 7 AM every day."
