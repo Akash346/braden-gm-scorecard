@@ -5,7 +5,7 @@ export const maxDuration = 60;
 
 const MAX_PAYLOAD_BYTES = 50 * 1024; // 50 KB
 const MAX_RETRIES = 2;
-const MODEL = "claude-sonnet-4-5-20250514";
+const MODEL = "claude-sonnet-4-5";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function stripDashes(value: any): any {
