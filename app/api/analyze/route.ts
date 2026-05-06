@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 const MAX_PAYLOAD_BYTES = 50 * 1024; // 50 KB
+const MAX_RETRIES = 2;
+const MODEL = "claude-sonnet-4-5-20250514";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function stripDashes(value: any): any {
@@ -172,76 +174,123 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 5. Call Claude
+  // 5. Call Claude with retry logic
   try {
     const client = new Anthropic({ apiKey });
+    const userPrompt = buildUserPrompt(body);
 
-    const message = await client.messages.create({
-      model: "claude-haiku-4-5",
-      max_tokens: 2048,
-      system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: buildUserPrompt(body),
-        },
-      ],
-    });
+    let lastError: string = "";
 
-    // 6. Extract text content
-    const textContent = message.content.find((c) => c.type === "text");
-    if (!textContent || textContent.type !== "text") {
-      return NextResponse.json(
-        { error: "AI returned no text response." },
-        { status: 502 }
-      );
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        console.log(`[/api/analyze] Attempt ${attempt}/${MAX_RETRIES} — model: ${MODEL}`);
+
+        const message = await client.messages.create({
+          model: MODEL,
+          max_tokens: 4096,
+          system: SYSTEM_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: userPrompt,
+            },
+          ],
+        });
+
+        console.log(
+          `[/api/analyze] Response received — stop_reason: ${message.stop_reason}, ` +
+          `content blocks: ${message.content.length}, ` +
+          `usage: ${JSON.stringify(message.usage)}`
+        );
+
+        // 6. Check for truncation
+        if (message.stop_reason === "max_tokens") {
+          console.error("[/api/analyze] Response truncated at max_tokens");
+          lastError = "AI response was truncated. Please try again.";
+          continue; // Retry
+        }
+
+        // 7. Extract text content
+        const textContent = message.content.find((c) => c.type === "text");
+        if (!textContent || textContent.type !== "text") {
+          lastError = "AI returned no text response.";
+          continue; // Retry
+        }
+
+        const rawText = textContent.text.trim();
+
+        // 8. Parse JSON response — robust extraction
+        let jsonText = rawText;
+
+        // Strip markdown fences if present
+        const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (fenceMatch) {
+          jsonText = fenceMatch[1].trim();
+        }
+
+        // Extract outermost JSON object { ... }
+        const firstBrace = jsonText.indexOf("{");
+        const lastBrace = jsonText.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          jsonText = jsonText.slice(firstBrace, lastBrace + 1);
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(jsonText);
+        } catch {
+          console.error(
+            `[/api/analyze] JSON parse failed (attempt ${attempt}). stop_reason:`, message.stop_reason,
+            "| raw length:", rawText.length,
+            "| first 500 chars:", rawText.slice(0, 500)
+          );
+          lastError = "AI returned invalid JSON. Please try again.";
+          continue; // Retry
+        }
+
+        // 9. Validate response shape
+        if (!validateAiResponse(parsed)) {
+          console.error(
+            `[/api/analyze] Response shape invalid (attempt ${attempt}). Keys:`,
+            Object.keys(parsed as Record<string, unknown>)
+          );
+          lastError = "AI response is missing required fields. Please try again.";
+          continue; // Retry
+        }
+
+        // Success!
+        console.log(`[/api/analyze] Success on attempt ${attempt}`);
+        return NextResponse.json({ insight: stripDashes(parsed) }, { status: 200 });
+
+      } catch (retryErr: unknown) {
+        const retryMsg = retryErr instanceof Error ? retryErr.message : "Unknown error";
+        console.error(`[/api/analyze] Attempt ${attempt} threw:`, retryMsg);
+
+        // Don't retry auth errors — they'll never succeed
+        if (retryMsg.includes("401") || retryMsg.includes("authentication") || retryMsg.includes("invalid x-api-key")) {
+          return NextResponse.json(
+            { error: "AI service authentication failed. Check your ANTHROPIC_API_KEY." },
+            { status: 502 }
+          );
+        }
+
+        lastError = retryMsg;
+      }
     }
 
-    const rawText = textContent.text.trim();
-
-    // 7. Parse JSON response — strip any markdown fences Claude might add
-    let jsonText = rawText;
-    const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fenceMatch) {
-      jsonText = fenceMatch[1].trim();
-    }
-    // Also handle case where response starts with { directly
-    const jsonStart = jsonText.indexOf("{");
-    if (jsonStart > 0) {
-      jsonText = jsonText.slice(jsonStart);
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch {
-      return NextResponse.json(
-        { error: "AI returned invalid JSON. Please try again." },
-        { status: 502 }
-      );
-    }
-
-    // 8. Validate response shape
-    if (!validateAiResponse(parsed)) {
-      return NextResponse.json(
-        { error: "AI response is missing required fields. Please try again." },
-        { status: 502 }
-      );
-    }
-
-    return NextResponse.json({ insight: stripDashes(parsed) }, { status: 200 });
+    // All retries exhausted
+    console.error(`[/api/analyze] All ${MAX_RETRIES} attempts failed. Last error: ${lastError}`);
+    return NextResponse.json(
+      { error: lastError || "AI analysis failed after multiple attempts. Please try again." },
+      { status: 502 }
+    );
   } catch (err: unknown) {
-    // Do NOT expose API key or internal details in error response
+    // Outer catch — only reached for unexpected errors (e.g. import/setup issues)
     const message =
       err instanceof Error ? err.message : "Unknown error occurred";
 
-    // Check for Anthropic-specific errors
-    if (message.includes("401") || message.includes("authentication")) {
-      return NextResponse.json(
-        { error: "AI service authentication failed. Check configuration." },
-        { status: 502 }
-      );
-    }
+    console.error("[/api/analyze] Outer catch:", message);
+
     if (message.includes("429") || message.includes("rate")) {
       return NextResponse.json(
         { error: "AI service rate limit reached. Please wait and try again." },
@@ -255,7 +304,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.error("[/api/analyze] Claude call failed:", message);
     return NextResponse.json(
       { error: "AI analysis failed. Please try again." },
       { status: 502 }
